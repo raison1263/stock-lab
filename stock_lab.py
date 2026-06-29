@@ -380,6 +380,117 @@ def market_of(listings: pd.DataFrame, ticker: str) -> str:
     return str(hit["market"].iloc[0]) if len(hit) else ("US" if str(ticker)[:1].isalpha() else "KR")
 
 
+def quote(ticker: str, start: str = "2024-06-01") -> dict:
+    """목록 표시용 간단 시세: 최근 종가·전일대비·거래량·거래대금. 짧은 구간만."""
+    df = load_data(ticker, start=start)
+    if len(df) < 2:
+        raise ValueError("시세 데이터가 부족합니다.")
+    last = float(df["Close"].iloc[-1])
+    prev = float(df["Close"].iloc[-2])
+    volume = float(df["Volume"].iloc[-1]) if "Volume" in df else 0.0
+    return {"last": last, "prev": prev, "chg": last - prev,
+            "pct": (last / prev - 1) * 100 if prev else 0.0,
+            "volume": volume, "value": last * volume}
+
+
+def info_stats(df: pd.DataFrame) -> dict:
+    """종목정보 '시세' 카드용 통계 (토스 시세 카드와 동일 항목)."""
+    last = df.iloc[-1]
+    yr = df.tail(252)
+    vol = float(last["Volume"]) if "Volume" in df else None
+    return {
+        "현재가": float(last["Close"]),
+        "시작가": float(last["Open"]),
+        "종가": float(last["Close"]),
+        "1일최저": float(last["Low"]),
+        "1일최고": float(last["High"]),
+        "1년최저": float(yr["Low"].min()),
+        "1년최고": float(yr["High"].max()),
+        "거래량": vol,
+        "거래대금": (float(last["Close"]) * vol) if vol else None,
+    }
+
+
+# 발견 화면 상단 지수 (FinanceDataReader 공식 심볼)
+INDICES = [("KS11", "코스피"), ("KQ11", "코스닥"), ("IXIC", "나스닥"),
+           ("US500", "S&P500"), ("DJI", "다우"), ("USD/KRW", "환율"), ("VIX", "VIX")]
+
+
+def index_quotes():
+    """상단 지수 바: 주요 지수·환율 (best-effort, 실패 시 건너뜀)."""
+    out = []
+    for code, name in INDICES:
+        try:
+            df = load_data(code, start="2024-06-01")
+            last, prev = float(df["Close"].iloc[-1]), float(df["Close"].iloc[-2])
+            out.append({"name": name, "last": last,
+                        "pct": (last / prev - 1) * 100 if prev else 0.0})
+        except Exception:
+            continue
+    return out
+
+
+def daily_table(df: pd.DataFrame, n: int = 30) -> pd.DataFrame:
+    """일별 시세 표: 날짜·종가·등락률·거래량 (최근 n일, 최신 위)."""
+    d = df.tail(n + 1).copy()
+    d["등락률"] = d["Close"].pct_change() * 100
+    out = d.iloc[1:][["Close", "등락률"]].copy()
+    out.columns = ["종가", "등락률"]
+    if "Volume" in df:
+        out["거래량"] = d.iloc[1:]["Volume"].astype("int64")
+    out.index = out.index.strftime("%Y-%m-%d")
+    return out.iloc[::-1]  # 최신이 위로
+
+
+# 발견 화면용 주요 종목 풀 (한국 코스피·코스닥 대형주 + 미국 대표주)
+MARKET_UNIVERSE = [
+    # 한국
+    "005930", "000660", "373220", "207940", "005380", "005490", "035420",
+    "035720", "051910", "006400", "000270", "068270", "105560", "055550",
+    "012330", "028260", "066570", "003670", "096770", "034730", "015760",
+    "017670", "030200", "032830", "086790", "316140", "024110", "138040",
+    "010130", "009150", "011200", "018260", "010950", "267260", "047050",
+    "090430", "051900", "033780", "097950", "271560", "000810", "402340",
+    "302440", "326030", "128940", "022100", "196170", "247540", "086520",
+    "091990", "067310", "095340", "058470", "240810", "357780", "112040",
+    # 미국
+    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "JPM",
+    "V", "WMT", "MA", "JNJ", "COST", "ORCL", "HD", "PG", "NFLX", "AMD",
+    "ADBE", "CRM", "INTC", "QCOM", "TXN", "AMAT", "MU", "PLTR", "UBER",
+    "DIS", "PYPL", "BA", "KO", "PEP", "MCD", "NKE", "SBUX", "GE", "F",
+]
+
+
+def market_rankings(get_quote_fn, listings, top=20, markets=None):
+    """
+    주요 종목 풀에서 시세를 받아 급상승/급하락/거래대금/거래량 순위를 반환.
+    get_quote_fn: 캐시된 시세 함수(ticker -> {last, prev, chg, pct, volume, value}).
+    markets: {'KR'} 또는 {'US'} 로 필터. None이면 전체.
+    """
+    rows = []
+    for tk in MARKET_UNIVERSE:
+        mk = market_of(listings, tk)
+        if markets and mk not in markets:
+            continue
+        try:
+            q = get_quote_fn(tk)
+            rows.append({"ticker": tk, "name": get_name(listings, tk), "market": mk,
+                         "last": q["last"], "pct": q["pct"],
+                         "volume": q.get("volume", 0), "value": q.get("value", 0)})
+        except Exception:
+            continue
+    df = pd.DataFrame(rows)
+    empty = {"거래대금": df, "거래량": df, "급상승": df, "급하락": df}
+    if df.empty:
+        return empty
+    return {
+        "거래대금": df.sort_values("value", ascending=False).head(top).reset_index(drop=True),
+        "거래량": df.sort_values("volume", ascending=False).head(top).reset_index(drop=True),
+        "급상승": df.sort_values("pct", ascending=False).head(top).reset_index(drop=True),
+        "급하락": df.sort_values("pct", ascending=True).head(top).reset_index(drop=True),
+    }
+
+
 # ======================================================================
 # 9. CLI 데모
 # ======================================================================
